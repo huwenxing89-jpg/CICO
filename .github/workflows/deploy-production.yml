@@ -1,0 +1,88 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ secrets.PRODUCTION_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build project
+        run: pnpm build
+        env:
+          NUXT_PUBLIC_APP_ENV: production
+
+      - name: Create Release Archive
+        run: |
+          tar -czf release.tar.gz .output ecosystem.config.cjs scripts/
+
+      - name: Upload Release Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-archive
+          path: release.tar.gz
+          retention-days: 30
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_SERVER }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to Server
+        run: |
+          chmod +x scripts/deploy.sh
+          ./scripts/deploy.sh
+        env:
+          DEPLOY_SERVER: ${{ secrets.DEPLOY_SERVER }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH_PRODUCTION }}
+          HEALTH_URL: ${{ secrets.HEALTH_URL_PRODUCTION }}
+
+      - name: Health Check
+        run: |
+          chmod +x scripts/health-check.sh
+          ./scripts/health-check.sh
+        env:
+          HEALTH_URL: ${{ secrets.HEALTH_URL_PRODUCTION }}
+
+      - name: Notify Success
+        if: success()
+        run: |
+          echo "部署成功！"
+          # TODO: 添加 Slack/Teams 通知
+
+      - name: Notify Failure
+        if: failure()
+        run: |
+          echo "部署失败！"
+          # TODO: 添加 Slack/Teams 告警

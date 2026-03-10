@@ -1,0 +1,80 @@
+name: Deploy with OIDC
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # 必需：用于 OIDC
+  contents: read    # 必需：用于检出代码
+
+jobs:
+  deploy:
+    name: Deploy to Production (OIDC)
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ secrets.PRODUCTION_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build project
+        run: pnpm build
+        env:
+          NUXT_PUBLIC_APP_ENV: production
+
+      - name: Upload to S3
+        run: |
+          # 使用 OIDC 凭证上传到 S3（无需静态密钥）
+          aws s3 sync .output/ s3://${{ secrets.DEPLOY_BUCKET }}/releases/${{ github.sha }}/ --delete
+
+      - name: Trigger Deployment via SSM
+        run: |
+          # 使用 AWS SSM 在服务器上触发部署
+          aws ssm send-command \
+            --instance-ids ${{ secrets.INSTANCE_ID }} \
+            --document-name "AWS-RunShellScript" \
+            --parameters commands=[
+              "cd /var/www/app",
+              "aws s3 sync s3://${{ secrets.DEPLOY_BUCKET }}/releases/${{ github.sha }}/ .output/",
+              "pm2 reload ecosystem.config.cjs --env production"
+            ] \
+            --region us-east-1
+
+      - name: Health Check
+        run: |
+          chmod +x scripts/health-check.sh
+          ./scripts/health-check.sh
+        env:
+          HEALTH_URL: ${{ secrets.HEALTH_URL_PRODUCTION }}
+
+      - name: Log Deployment to CloudWatch
+        run: |
+          # 记录部署事件到 CloudWatch
+          aws logs put-log-events \
+            --log-group-name /ci-cd/deployments \
+            --log-stream-name production \
+            --log-events timestamp=$(date +%s)000,message="Deployment ${{ github.sha }} completed successfully"

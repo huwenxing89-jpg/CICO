@@ -1,0 +1,27 @@
+{
+  "apps": [
+    {
+      "name": "nuxt-app",
+      "script": ".\\.output\\server\\index.mjs",
+      "instances": 1,
+      "exec_mode": "fork",
+      "env": {
+        "NODE_ENV": "production",
+        "PORT": 3000
+      },
+      "env_production": {
+        "NODE_ENV": "production",
+        "PORT": 3000
+      },
+      "error_file": ".\\logs\\nuxt-error.log",
+      "out_file": ".\\logs\\nuxt-out.log",
+      "log_date_format": "YYYY-MM-DD HH:mm:ss Z",
+      "merge_logs": true,
+      "max_memory_restart": "500M",
+      "min_uptime": "10s",
+      "autorestart": true,
+      "watch": false,
+      "windowsHide": true
+    }
+  ]
+}

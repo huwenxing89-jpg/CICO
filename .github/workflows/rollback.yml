@@ -1,0 +1,57 @@
+name: Rollback Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to rollback'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      version:
+        description: 'Specific version to rollback to (leave empty for previous)'
+        required: false
+        type: string
+
+jobs:
+  rollback:
+    name: Rollback
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_SERVER }} >> ~/.ssh/known_hosts
+
+      - name: Rollback to Previous Version
+        run: |
+          chmod +x scripts/rollback.sh
+          ./scripts/rollback.sh ${{ inputs.version || '' }}
+        env:
+          DEPLOY_SERVER: ${{ secrets.DEPLOY_SERVER }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ inputs.environment == 'production' && secrets.DEPLOY_PATH_PRODUCTION || secrets.DEPLOY_PATH_STAGING }}
+          HEALTH_URL: ${{ inputs.environment == 'production' && secrets.HEALTH_URL_PRODUCTION || secrets.HEALTH_URL_STAGING }}
+
+      - name: Health Check
+        run: |
+          chmod +x scripts/health-check.sh
+          ./scripts/health-check.sh
+        env:
+          HEALTH_URL: ${{ inputs.environment == 'production' && secrets.HEALTH_URL_PRODUCTION || secrets.HEALTH_URL_STAGING }}
+
+      - name: Notify Rollback
+        if: success()
+        run: |
+          echo "回滚成功！"
+          # TODO: 添加 Slack/Teams 通知

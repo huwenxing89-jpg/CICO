@@ -1,0 +1,164 @@
+name: Canary Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      traffic_percentage:
+        description: '流量百分比 (10, 25, 50)'
+        required: true
+        type: choice
+        options:
+          - 10
+          - 25
+          - 50
+      duration:
+        description: '金丝雀持续时间（分钟）'
+        required: true
+        type: choice
+        default: '30'
+        options:
+          - '15'
+          - '30'
+          - '60'
+          - '120'
+
+concurrency:
+  group: canary-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy-canary:
+    name: Deploy Canary Version
+    runs-on: ubuntu-latest
+    environment:
+      name: production-canary
+      url: ${{ secrets.PRODUCTION_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build canary version
+        run: pnpm build
+        env:
+          NUXT_PUBLIC_APP_ENV: production
+          APP_VERSION: canary-${{ github.sha }}
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_SERVER }} >> ~/.ssh/known_hosts
+
+      - name: Deploy Canary Version
+        run: |
+          # 创建金丝雀发布目录
+          CANARY_PATH="${{ secrets.DEPLOY_PATH_PRODUCTION }}-canary"
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_SERVER }} "mkdir -p $CANARY_PATH"
+
+          # 上传金丝雀版本
+          rsync -avz --delete \
+            -e "ssh -o StrictHostKeyChecking=no" \
+            .output/ \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_SERVER }}:$CANARY_PATH/
+
+          # 上传金丝雀 PM2 配置
+          scp ecosystem.canary.cjs ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_SERVER }}:$CANARY_PATH/ecosystem.config.cjs
+
+          # 启动金丝雀版本
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_SERVER }} "cd $CANARY_PATH && pm2 start ecosystem.config.cjs --env production"
+
+      - name: Update Nginx Configuration
+        run: |
+          # 上传金丝雀 Nginx 配置
+          scp infrastructure/nginx/canary.conf \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_SERVER }}:/etc/nginx/sites-available/app-canary.conf"
+
+          # 更新流量百分比
+          PERCENTAGE=${{ inputs.traffic_percentage }}
+          STABLE_PERCENT=$((100 - PERCENTAGE))
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_SERVER }} \
+            "sed -i 's/${PERCENT}%.*app_canary/${PERCENT}%      \"app_canary\"/' /etc/nginx/sites-available/app-canary.conf"
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_SERVER }} \
+            "sed - 's/\*.*app_stable/${STABLE_PERCENT}%        \"app_stable\"/' /etc/nginx/sites-available/app-canary.conf"
+
+          # 启用金丝雀配置
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_SERVER }} \
+            "ln -sf /etc/nginx/sites-available/app-canary.conf /etc/nginx/sites-enabled/app-canary.conf"
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_SERVER }} "nginx -t && nginx -s reload"
+
+      - name: Monitor Canary
+        run: |
+          DURATION=${{ inputs.duration }}
+          echo "监控金丝雀版本 ${DURATION} 分钟..."
+
+          for i in $(seq 1 $DURATION); do
+            echo "检查点 $i/$DURATION"
+
+            # 检查金丝雀健康状态
+            CANARY_HEALTH=$(curl -s ${{ secrets.HEALTH_URL_PRODUCTION }}/canary || echo "failed")
+
+            if echo "$CANARY_HEALTH" | grep -q "healthy"; then
+              echo "✓ 金丝雀版本健康"
+            else
+              echo "✗ 金丝雀版本异常: $CANARY_HEALTH"
+              exit 1
+            fi
+
+            # 等待 1 分钟
+            sleep 60
+          done
+
+      - name: Promote Canary (if successful)
+        if: success()
+        run: |
+          echo "金丝雀部署成功！可以手动决定是否全量发布"
+          # TODO: 添加自动全量发布逻辑
+
+      - name: Rollback Canary (if failed)
+        if: failure()
+        run: |
+          echo "金丝雀部署失败，执行回滚"
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_SERVER }} \
+            "rm -f /etc/nginx/sites-enabled/app-canary.conf && nginx -s reload"
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_SERVER }} \
+            "cd ${{ secrets.DEPLOY_PATH_PRODUCTION }}-canary && pm2 delete ecosystem.config.cjs"
+
+  # 自动回滚工作流
+  rollback-canary:
+    name: Auto-Rollback Canary
+    runs-on: ubuntu-latest
+    needs: deploy-canary
+    if: failure()
+
+    steps:
+      - name: Rollback Nginx
+        run: |
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_SERVER }} \
+            "rm -f /etc/nginx/sites-enabled/app-canary.conf && nginx -s reload"
+
+      - name: Stop Canary Process
+        run: |
+          CANARY_PATH="${{ secrets.DEPLOY_PATH_PRODUCTION }}-canary"
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_SERVER }} \
+            "cd $CANARY_PATH && pm2 delete ecosystem.config.cjs || true"
+
+      - name: Notify Team
+        run: |
+          echo "金丝雀部署已自动回滚"
+          # TODO: 添加 Slack/Teams 通知

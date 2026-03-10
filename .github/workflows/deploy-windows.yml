@@ -1,0 +1,90 @@
+name: Deploy to Windows Server
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: windows-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Windows Server
+    runs-on: ubuntu-latest
+    environment:
+      name: production-windows
+      url: ${{ secrets.PRODUCTION_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build project
+        run: pnpm build
+        env:
+          NUXT_PUBLIC_APP_ENV: production
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_SERVER }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to Windows Server
+        run: |
+          # 确保 PowerShell 脚本有执行权限
+          chmod +x scripts/*.ps1
+
+          # 使用 SSH 执行远程 PowerShell 脚本
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_SERVER }} "powershell -ExecutionPolicy Bypass -Command -" <<'ENDSSH'
+            # 远程 Windows 服务器上的命令
+            # 这里我们直接从本地执行 deploy.ps1，它会通过 SSH 连接到远程服务器
+          ENDSSH
+
+          # 或者直接在本地执行 PowerShell 脚本
+          pwsh -File scripts/deploy.ps1
+        env:
+          DEPLOY_SERVER: ${{ secrets.DEPLOY_SERVER }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH_PRODUCTION }}
+          HEALTH_URL: ${{ secrets.HEALTH_URL_PRODUCTION }}
+          DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
+
+      - name: Health Check
+        run: |
+          pwsh -File scripts/health-check.ps1
+        env:
+          HEALTH_URL: ${{ secrets.HEALTH_URL_PRODUCTION }}
+
+      - name: Notify Success
+        if: success()
+        run: |
+          pwsh -File scripts/notify.ps1 -Status "success" -Environment "production" -Version "${{ github.sha }}"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+
+      - name: Notify Failure
+        if: failure()
+        run: |
+          pwsh -File scripts/notify.ps1 -Status "failed" -Environment "production" -Version "${{ github.sha }}"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
